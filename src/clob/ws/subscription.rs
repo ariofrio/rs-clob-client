@@ -7,10 +7,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Instant;
 
+use async_broadcast::RecvError;
 use async_stream::try_stream;
 use dashmap::{DashMap, Entry};
 use futures::Stream;
-use tokio::sync::broadcast::error::RecvError;
 
 use super::interest::{InterestTracker, MessageInterest};
 use super::types::request::SubscriptionRequest;
@@ -295,10 +295,8 @@ impl SubscriptionManager {
                             yield msg
                         }
                     }
-                    Err(RecvError::Lagged(n)) => {
-                        #[cfg(feature = "tracing")]
-                        tracing::warn!("Subscription lagged, missed {n} messages");
-                        Err(WsError::Lagged { count: n })?;
+                    Err(RecvError::Overflowed(n)) => {
+                        unreachable!("broadcast channel overflowed by {n} messages, but overflow mode is disabled");
                     }
                     Err(RecvError::Closed) => {
                         break;
@@ -381,10 +379,8 @@ impl SubscriptionManager {
                             yield msg;
                         }
                     }
-                    Err(RecvError::Lagged(n)) => {
-                        #[cfg(feature = "tracing")]
-                        tracing::warn!("Subscription lagged, missed {n} messages");
-                        Err(WsError::Lagged { count: n })?;
+                    Err(RecvError::Overflowed(n)) => {
+                        unreachable!("broadcast channel overflowed by {n} messages, but overflow mode is disabled");
                     }
                     Err(RecvError::Closed) => {
                         break;

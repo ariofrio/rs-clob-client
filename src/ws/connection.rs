@@ -12,7 +12,7 @@ use futures::{SinkExt as _, StreamExt as _};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 use tokio::time::{interval, sleep, timeout};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
@@ -99,7 +99,9 @@ where
     /// Sender channel for outgoing messages
     sender_tx: mpsc::UnboundedSender<String>,
     /// Broadcast sender for incoming messages
-    broadcast_tx: broadcast::Sender<M>,
+    broadcast_tx: async_broadcast::Sender<M>,
+    /// Ensures the broadcast channel remains open even when no active receivers exist
+    _broadcast_rx: async_broadcast::InactiveReceiver<M>,
     /// Phantom data for unused type parameters
     _phantom: PhantomData<P>,
 }
@@ -116,8 +118,11 @@ where
     /// handles reconnection according to the config's `ReconnectConfig`.
     pub fn new(endpoint: String, config: Config, parser: P) -> Result<Self> {
         let (sender_tx, sender_rx) = mpsc::unbounded_channel();
-        let (broadcast_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let (mut broadcast_tx, broadcast_rx) = async_broadcast::broadcast(BROADCAST_CAPACITY);
         let (state_tx, state_rx) = watch::channel(ConnectionState::Disconnected);
+
+        // Drop messages when no active receivers exist
+        broadcast_tx.set_await_active(false);
 
         // Spawn connection task
         let connection_config = config;
@@ -142,6 +147,7 @@ where
             state_rx,
             sender_tx,
             broadcast_tx,
+            _broadcast_rx: broadcast_rx.deactivate(),
             _phantom: PhantomData,
         })
     }
@@ -151,7 +157,7 @@ where
         endpoint: String,
         config: Config,
         mut sender_rx: mpsc::UnboundedReceiver<String>,
-        broadcast_tx: broadcast::Sender<M>,
+        broadcast_tx: async_broadcast::Sender<M>,
         parser: P,
         state_tx: watch::Sender<ConnectionState>,
     ) {
@@ -220,7 +226,7 @@ where
     async fn handle_connection(
         ws_stream: WsStream,
         sender_rx: &mut mpsc::UnboundedReceiver<String>,
-        broadcast_tx: &broadcast::Sender<M>,
+        broadcast_tx: &async_broadcast::Sender<M>,
         state_rx: watch::Receiver<ConnectionState>,
         config: Config,
         parser: &P,
@@ -253,7 +259,7 @@ where
                                     for message in messages {
                                         #[cfg(feature = "tracing")]
                                         tracing::trace!(?message, "Parsed WebSocket message");
-                                        _ = broadcast_tx.send(message);
+                                        _ = broadcast_tx.broadcast(message).await;
                                     }
                                 }
                                 Err(e) => {
@@ -403,8 +409,8 @@ where
     /// Each call returns a new independent receiver. Multiple subscribers can
     /// receive messages concurrently without blocking each other.
     #[must_use]
-    pub fn subscribe(&self) -> broadcast::Receiver<M> {
-        self.broadcast_tx.subscribe()
+    pub fn subscribe(&self) -> async_broadcast::Receiver<M> {
+        self.broadcast_tx.new_receiver()
     }
 
     /// Subscribe to connection state changes.
